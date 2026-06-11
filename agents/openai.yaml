@@ -1,0 +1,4 @@
+interface:
+  display_name: "ANSYS Maxwell PyAEDT"
+  short_description: "Automate Maxwell 2D/3D project setup, solves, and Touchstone export with PyAEDT."
+  default_prompt: "Use $ansys-maxwell to inspect, create, or automate a Maxwell project through PyAEDT."
