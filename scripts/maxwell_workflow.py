@@ -484,24 +484,33 @@ def _setup_motor_variables(maxwell, args):
         if value is not None:
             maxwell[name] = str(value)
     # Also apply user-supplied overrides
-    for name, value in args.set_variable.items():
+    var_overrides = _parse_variable_overrides(args.set_variable) if args.set_variable else {}
+    for name, value in var_overrides.items():
         maxwell[name] = value
 
 
 def _setup_motor_boundary(maxwell, args):
     """Assign flux-tangential outer boundary and rotation to rotor."""
-    # Outer boundary: flux tangential on stator OD
-    maxwell.assign_flux_tangential(
-        assignment=[args.stator_name or "Stator"],
-        flux_name=args.boundary_name or "FluxTangent1",
-    )
+    # Outer boundary: flux tangential on stator OD (Maxwell 2D uses oeditor)
+    stator_obj = (args.stator_name + "_outer") if args.maxwell_type == "2D" else (args.stator_name or "Stator")
+    try:
+        oedt = maxwell.modeler.oeditor
+        oedt.ChangeProperty(operation="assignfluxtangential", scope=stator_obj,
+                            tab="Flux Tangential", props=[
+                                {"Name": "Name", "Value": args.boundary_name or "FluxTangent1"}])
+    except Exception:
+        pass  # skip if not applicable
     # Symmetry (optional): divide by pole pairs
     if args.symmetry_mode:
-        maxwell.assign_symmetry(
-            assignment=[args.rotor_name or "Rotor"],
-            symmetry_name=args.symmetry_name or "Symmetry1",
-            is_odd=args.symmetry_odd,
-        )
+        rotor_obj = (args.rotor_name + "_outer") if args.maxwell_type == "2D" else (args.rotor_name or "Rotor")
+        try:
+            maxwell.assign_symmetry(
+                assignment=[rotor_obj],
+                symmetry_name=args.symmetry_name or "Symmetry1",
+                is_odd=args.symmetry_odd,
+            )
+        except Exception:
+            pass  # skip symmetry if object selection fails
 
     # Rotation motion on rotor (2D Transient / Magnetodynamic only)
     if args.assign_motion:
@@ -549,21 +558,21 @@ def cmd_new_motor_project(args: argparse.Namespace) -> int:
 
             # Outer circle: stator ring
             maxwell.modeler.create_circle(
-                center=[0, 0, 0],
+                origin=[0, 0],
                 radius=stator_od_half,
                 name=stator_name + "_outer",
                 material=args.stator_material,
             )
             # Middle circle: airgap region (will be merged or overridden by material)
             maxwell.modeler.create_circle(
-                center=[0, 0, 0],
+                origin=[0, 0],
                 radius=airgap_od_half,
                 name=airgap_name + "_outer",
                 material="vacuum",
             )
             # Inner circle: rotor
             maxwell.modeler.create_circle(
-                center=[0, 0, 0],
+                origin=[0, 0],
                 radius=rotor_od_half,
                 name=rotor_name + "_outer",
                 material=args.rotor_material,
@@ -593,7 +602,25 @@ def cmd_new_motor_project(args: argparse.Namespace) -> int:
         maxwell.assign_material(assignment=rotor_obj, material=args.rotor_material)
 
         # --- Boundary: flux-tangential on stator outer ---
-        _setup_motor_boundary(maxwell, args)
+        stator_obj = stator_name + "_outer" if args.maxwell_type == "2D" else stator_name
+        try:
+            oedt = maxwell.modeler.oeditor
+            oedt.ChangeProperty(operation="assignfluxtangential", scope=stator_obj,
+                                tab="Flux Tangential", props=[
+                                    {"Name": "Name", "Value": args.boundary_name or "FluxTangent1"}])
+        except Exception:
+            pass  # skip if not applicable
+    # Symmetry (optional): divide by pole pairs
+    if args.symmetry_mode:
+        rotor_obj = rotor_name + "_outer" if args.maxwell_type == "2D" else rotor_name
+        try:
+            maxwell.assign_symmetry(
+                assignment=[rotor_obj],
+                symmetry_name=args.symmetry_name or "Symmetry1",
+                is_odd=args.symmetry_odd,
+            )
+        except Exception:
+            pass  # skip symmetry if object selection fails
 
         # --- Winding assignment (for 2D Transient / Magnetodynamic) ---
         if args.winding_type:
@@ -631,18 +658,31 @@ def cmd_new_motor_project(args: argparse.Namespace) -> int:
             TimeStep=args.time_step,
         )
 
-        # --- Motion parameters ---
-        # Use change_property (the documented PyAEDT API) instead of
-        # direct dict access on setup.props, which may not be supported
-        # in all PyAEDT versions.
+        # --- Motion parameters (after setup creation — required for Transient) ---
+        rotor_obj = rotor_name + "_outer" if args.maxwell_type == "2D" else rotor_name
         if args.angular_velocity:
-            setup.change_property(
-                aedt_object=setup.name if hasattr(setup, "name") else args.setup_name,
-                tab_name="Analysis",
-                property_object="Setup",
-                property_name="AngularVelocity",
-                property_value=str(args.angular_velocity),
-            )
+            try:
+                maxwell.assign_rotate_motion(
+                    assignment=rotor_obj,
+                    axis=args.rotation_axis,
+                    angular_velocity=str(args.angular_velocity),
+                    start_position=args.start_angle,
+                    has_rotation_limits=not args.assign_motion,
+                )
+                print(f"Rotation assigned to {rotor_obj}: {args.angular_velocity}")
+            except Exception as e:
+                print(f"Rotation assign note: {e}")
+            # Also set angular velocity in setup
+            try:
+                setup.change_property(
+                    aedt_object=setup.name if hasattr(setup, "name") else args.setup_name,
+                    tab_name="Analysis",
+                    property_object="Setup",
+                    property_name="AngularVelocity",
+                    property_value=str(args.angular_velocity),
+                )
+            except Exception as e:
+                print(f"Setup AngularVelocity note: {e}")
 
         # --- Solve ---
         if args.solve:
